@@ -235,6 +235,11 @@ abstract class phpbb_bbcode_parser_base
 				$parsed[$key] = $val;
 				next($string);
 			}
+
+			if (current($string) !== false)
+			{
+				$parsed[key($string) * 2] = current($string);
+			}
 	
 			$this->parsed = array();
 			$this->parse_pos = 1;
