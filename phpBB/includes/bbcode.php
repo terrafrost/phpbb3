@@ -32,6 +32,8 @@ class bbcode
 	var $template_bitfield;
 	var $template_filename = '';
 
+	var $replace = '';
+
 	/**
 	* Constructor
 	* Init bbcode cache entries if bitfield is specified
@@ -109,7 +111,23 @@ class bbcode
 							$undid_bbcode_specialchars = true;
 						}
 
-						$message = preg_replace($preg['search'], $preg['replace'], $message);
+						for ($i = 0; $i < sizeof($preg['search']); $i++)
+						{
+							$closing = strrpos($preg['search'][$i], $preg['search'][$i][0]);
+							$modifiers = substr($preg['search'][$i], $closing);
+							// protect against <a name="[anchor2]zzz[/anchor2]">[anchor2]zzz[/anchor2]</a>-type XSS vulnerabilities
+							$preg['search'][$i] = $preg['search'][$i][0] . '(?' . '>' . substr($preg['search'][$i], 1, $closing - 1) . ')(?=[^"]*(?:"[^"]*"[^"]*)*$)' . $modifiers;
+							if (strpos($modifiers, 'e', 1))
+							{
+								// if the e modifier is set there is no easy way to determine if the BBcode in question is being inserted into an HTML attribute or not.
+								// thankfully, custom BBcodes don't use the e modifier on the second pass.
+								$message = preg_replace($preg['search'][$i], $preg['replace'][$i], $message);
+								continue;
+							}
+							$this->replace = $preg['replace'][$i];
+							$message = preg_replace_callback($preg['search'][$i], array($this, 'replace'), $message);
+						}
+
 						$preg = array('search' => array(), 'replace' => array());
 					}
 				}
@@ -118,6 +136,28 @@ class bbcode
 
 		// Remove the uid from tags that have not been transformed into HTML
 		$message = str_replace(':' . $this->bbcode_uid, '', $message);
+	}
+
+	/**
+	* Replace BBcodes with their corresponding HTML only if such a replacement would not open up the possibility of XSS
+	*/
+	function replace($matches)
+	{
+		$replace_pairs = array();
+
+		for ($i = 1; $i < sizeof($matches); $i++)
+		{
+			// protect against [anchor2]<a name="zzz"></a>[/anchor2]-type XSS vulnerabilities
+			if (preg_match("#\\$($i|\\{{$i}\\})(?![^\"]*(\"[^\"]*\"[^\"]*)*$)#", $this->replace) && !preg_match('#^[^<>"]*$#', $matches[$i]))
+			{
+				return $matches[0];
+			}
+
+			$replace_pairs["$$i"] = $matches[$i];
+			$replace_pairs["\${{$i}}"] = $matches[$i];
+		}
+
+		return strtr($this->replace, $replace_pairs);
 	}
 
 	/**
