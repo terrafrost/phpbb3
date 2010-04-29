@@ -50,6 +50,7 @@ abstract class phpbb_bbcode_parser_base
 	 * 			'tag2' => true,
 	 * 			// ...
 	 * 		),
+	*		'children_func' => 'function_name', // Decide which children to allow based on the attributes that are present.
 	 * 		'parents' => array(true), // Same as 'children'.
 	 * 		// Optional
 	 * 		'content_func' => 'function_name', // Applies function to the contents of the tag and replaces it with the output. Used only when the tag does not allow children. It must return the replacement string and accept the input string. This is not like HTML...
@@ -95,7 +96,7 @@ abstract class phpbb_bbcode_parser_base
 	 *
 	 * @var string
 	 */
-	private $tag_regex = '\[(/?)([a-z][a-z0-9]*)(?:=(\'[^\']*\'|"[^"]*"))?((?: [a-z]+(?:\s?=\s?(?:\'[^\']*\'|"[^"]*"))?)*)\]';
+	private $tag_regex = '\[(/?)(\*|[a-z][a-z0-9]*)(?:=(\'[^\']*\'|"[^"]*"|[^ \]]*))?((?: [a-z]+(?:\s?=\s?(?:\'[^\']*\'|"[^"]*"|[^ \]]*))?)*)\]';
 	
 	/**
 	 * Regex for URL's
@@ -265,7 +266,7 @@ abstract class phpbb_bbcode_parser_base
 		$string = unserialize($string);
 		for ($i = 1, $n = sizeof($string); $i < $n; $i += 2)
 		{
-			$string[$i] = $this->decompile_tag($tag);
+			$string[$i] = $this->decompile_tag($string[$i]);
 		}
 		return implode('', $string);
 	}
@@ -389,7 +390,7 @@ abstract class phpbb_bbcode_parser_base
 
 					if ($tag != $this->stack[0]['name'])
 					{
-						$string[$i] = $this->decompile_tag('/' . $tag);
+						$string[$i] = $this->decompile_tag($string[$i]);
 					}
 					else if (isset($tag_definition['close_shadow']))
 					{
@@ -552,6 +553,12 @@ abstract class phpbb_bbcode_parser_base
 	 */
 	private function first_pass_tag_check($matches)
 	{
+		// Parent tag does not allow children
+		if (sizeof($matches) != 5 && sizeof($this->stack) && $this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+		{
+			return $matches[0];
+		}
+
 		switch (sizeof($matches))
 		{
 			// Smilies
@@ -609,20 +616,14 @@ abstract class phpbb_bbcode_parser_base
 						return $matches[0];
 					}
 		
-					if ($this->tags[$matches[self::MATCH_TAG_NAME]]['close'] !== false || !isset($this->tags[$matches[self::MATCH_TAG_NAME]]['close_shadow']))
-					{
-						// Do not add tags to stack that do not need closing tags.
-						array_unshift($this->stack, $matches[self::MATCH_TAG_NAME]);
-					}
-		
 					$tag_attributes = &$this->tags[$matches[self::MATCH_TAG_NAME]]['attributes'];
 		
 					if (strlen($matches[self::MATCH_SHORT_ARG]) != 0 && isset($tag_attributes['_']))
 					{
 						// Add short attribute.
-						$attributes = array('_' => substr($matches[self::MATCH_SHORT_ARG], 1, -1));
+						$attributes = array('_' => preg_replace('#^(["\'])(.*)\1$#', '$2', $matches[self::MATCH_SHORT_ARG]));
 					}
-					else if (strlen($matches[4]) == 0 || (sizeof($tag_attributes)) == 0)
+					else if (strlen($matches[self::MATCH_ARGS]) == 0 || (sizeof($tag_attributes)) == 0)
 					{
 						// Check all attributes, which were not used, if they are required.
 						if ($this->has_required($matches[self::MATCH_TAG_NAME], array_keys($tag_attributes)))
@@ -632,13 +633,12 @@ abstract class phpbb_bbcode_parser_base
 						}
 						else
 						{
-							$this->parsed[$this->parse_pos] = array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]);
+							$tag = array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]);
 							if (isset($attributes))
 							{
-								$this->parsed[$this->parse_pos][] = $attributes;
+								$tag[] = $attributes;
 							}
-							$this->parse_pos += 2;
-							return $this->delimiter;
+							return $this->add_tag($tag);
 						}
 					}
 					else
@@ -662,8 +662,7 @@ abstract class phpbb_bbcode_parser_base
 						if (isset($tag_attribs_matched))
 						{
 							// The attribute exists within the defined tag. Undefined tags are removed.
-		
-							$attr_value = substr($value[self::MATCH_ARG_VALUE], 1, -1);
+							$attr_value = preg_replace('#^(["\'])(.*)\1$#', '$2', $value[self::MATCH_ARG_VALUE]);
 		
 							if (isset($tag_attribs_matched['type_check']))
 							{
@@ -700,14 +699,10 @@ abstract class phpbb_bbcode_parser_base
 		
 					if (sizeof($attributes))
 					{
-						$this->parsed[$this->parse_pos] = array(self::TYPE_TAG, $matches[self::MATCH_TAG_NAME], $attributes);
-						$this->parse_pos += 2;
-						return $this->delimiter;
+						return $this->add_tag(array(self::TYPE_TAG, $matches[self::MATCH_TAG_NAME], $attributes));
 					}
 
-					$this->parsed[$this->parse_pos] = array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]);
-					$this->parse_pos += 2;
-					return $this->delimiter;
+					return $this->add_tag(array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]));
 				}
 				// If tag is a closing tag.
 				
@@ -732,7 +727,7 @@ abstract class phpbb_bbcode_parser_base
 					$to_close = array_splice($this->stack, 0, $valid + 1);
 					return $this->close_tags($to_close);
 				}
-				else
+				else if (!isset($this->tags[$matches[self::MATCH_TAG_NAME]]['close_shadow']))
 				{
 					// A unset() was elicting many notices here.
 					array_shift($this->stack);
@@ -740,9 +735,37 @@ abstract class phpbb_bbcode_parser_base
 					$this->parse_pos += 2;
 					return $this->delimiter;
 				}
+				else
+				{
+					return $matches[0];
+				}
 				
 			break;
 		}
+	}
+
+	/**
+	 * Adds a tag to $this->parsed and $this->stack
+	 *
+	 * @param array $tag
+	 * @return string
+	 */
+	private function add_tag($tag)
+	{
+		if ($this->tags[$tag[1]]['close'] !== false || !isset($this->tags[$tag[1]]['close_shadow']))
+		{
+			// Do not add tags to stack that do not need closing tags.
+			array_unshift($this->stack, $tag[1]);
+		}
+
+		if (isset($this->tags[$tag[1]]['children_func']))
+		{
+			$this->tags[$tag[1]]['children'] = call_user_func($this->tags[$tag[1]]['children_func'], isset($tag[2]) ? $tag[2] : array());
+		}
+
+		$this->parsed[$this->parse_pos] = $tag;
+		$this->parse_pos += 2;
+		return $this->delimiter;
 	}
 
 	/**
@@ -757,7 +780,7 @@ abstract class phpbb_bbcode_parser_base
 		foreach($tags as $tag)
 		{
 			// @todo: Is this needed?
-			if (!isset($this->tags[$tag]['close_shadow']))
+			if (!isset($this->tags[$tag]['close_shadow']) && $tag != 'children')
 			{
 				$this->parsed[$this->parse_pos] = array(self::TYPE_CTAG, $tag);
 				$this->parse_pos += 2;
@@ -775,7 +798,12 @@ abstract class phpbb_bbcode_parser_base
 	 */
 	private function decompile_tag(array $tag)
 	{
-		$ret = '[' . (($tag[0]) ? '' : '/');
+		if ($tag[0] == self::TYPE_ABSTRACT_SMILEY || $tag[0] == self::TYPE_ABSTRACT_URL)
+		{
+			return $tag[1];
+		}
+
+		$ret = '[' . (($tag[0] == self::TYPE_CTAG) ? '/' : '');
 		$ret .= $tag[1];
 		
 		if(isset($tag[2]))

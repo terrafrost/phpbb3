@@ -23,6 +23,7 @@ if (!defined('IN_PHPBB'))
 class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 {
 	private $list_stack = array();
+	private $php_code = false;
 	protected $tags = array();
 
 	public function __construct()
@@ -55,22 +56,28 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 
 			// Quote tag attempt.
 			'quote' => array(
-				'replace' => '<div class="quotetitle">{_}</div><div class="quotecontent">',
+				//'replace' => '<div class="quotetitle">{_}</div><div class="quotecontent">',
 				'close' => '</div>',
 				'attributes' => array(
 					'_' => array(
-						'replace' => '%s wrote:',
+						'replace' => '',
 					),
 				),
+				'replace_func' => array($this, 'quote_open'),
 				'children' => array(true),
 				'parents' => array(true),
 			),
 
 			// code tag (without the =php functionality)
 			'code' => array(
-				'replace' => '<div class="codetitle"><b>Code:</b></div><div class="codecontent">',
 				'close' => '</div>',
-				'attributes' => array(),
+				'replace_func' => array($this, 'code_open'),
+				'content_func' => array($this, 'code_content'),
+				'attributes' => array(
+					'_' => array(
+						'replace' => '',
+					),
+				),
 				'children' => array(false),
 				'parents' => array(true),
 			),
@@ -86,17 +93,16 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 						'replace' => '',
 					),
 				),
-				'children' => array(false, 'li' => true),
+				'children' => array(false, '*' => true),
 				'parents' => array(true),
 			),
 
-			// The exact * tag from phpBB. "*" is not a valid tag name in this parser... introducing li from HTML!
-			'li' => array(
+			'*' => array(
 				'replace' => '<li>',
 				'close' => '</li>',
 				'close_shadow' => true,
 				'attributes' => array(),
-				'children' => array(true, 'li' => true),
+				'children' => array(true, '*' => true),
 				'parents' => array(false, 'list' => true),
 			),
 
@@ -127,7 +133,8 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 						'replace' => '',
 					),
 				),
-				'children' => array(false),
+				// If the _ attribute is used the value corresponding to 'children' will be changed to array(true, array('url' => true)).
+				'children_func' => array($this, 'url_children'),
 				'parents' => array(true),
 
 			),
@@ -151,7 +158,8 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 				'attributes' => array(
 					'_' => array(
 						'replace' => '%s',
-						'required' => true
+						'required' => true,
+						'type_check' => 'ctype_digit'
 					),
 				),
 				'children' => array(true, 'size' => true),
@@ -221,6 +229,15 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 		return '<a href="' . $attributes['__'] . '">';
 	}
 
+	protected function url_children(array $attributes)
+	{
+		if (isset($attributes['_']))
+		{
+			return array(true, 'url' => true, '__url' => true);
+		}
+		return array(false);
+	}
+
  	protected function list_open(array $attributes = array(), array $definition = array())
 	{
 		if (isset($attributes['_']))
@@ -237,5 +254,105 @@ class phpbb_bbcode_parser extends phpbb_bbcode_parser_base
 			return '</ol>';
 		}
 		return '</ul>';
+	}
+
+	protected function quote_open(array $attributes)
+	{
+		static $quote_parser;
+
+		if (!isset($attributes['_']))
+		{
+			return '<div class="quotecontent">';
+		}
+
+		if (!isset($quote_parser))
+		{
+			$quote_parser = new quote_bbcode_parser();
+		}
+
+		$value = $quote_parser->second_pass($quote_parser->first_pass($attributes['_']));
+
+		return '<div class="quotetitle">' . $value . ' wrote: </div><div class="quotecontent">';
+	}
+
+	protected function code_open(array $attributes)
+	{
+		$this->php_code = isset($attributes['_']) && strtolower($attributes['_']) == 'php';
+
+		return '<div class="codetitle"><b>Code:</b></div><div class="codecontent">';
+	}
+
+	protected function code_content($code)
+	{
+		if (!$this->php_code)
+		{
+			return $code;
+		}
+
+		$remove_tags = false;
+
+		$str_from = array('&lt;', '&gt;', '&#91;', '&#93;', '&#46;', '&#58;', '&#058;');
+		$str_to = array('<', '>', '[', ']', '.', ':', ':');
+
+		$code = str_replace($str_from, $str_to, $code);
+
+		if (!preg_match('/\<\?.*?\?\>/is', $code))
+		{
+			$remove_tags = true;
+			$code = "<?php $code ?>";
+		}
+
+		$conf = array('highlight.bg', 'highlight.comment', 'highlight.default', 'highlight.html', 'highlight.keyword', 'highlight.string');
+		foreach ($conf as $ini_var)
+		{
+			@ini_set($ini_var, str_replace('highlight.', 'syntax', $ini_var));
+		}
+
+		// Because highlight_string is specialcharing the text (but we already did this before), we have to reverse this in order to get correct results
+		$code = htmlspecialchars_decode($code);
+		$code = highlight_string($code, true);
+
+		$str_from = array('<span style="color: ', '<font color="syntax', '</font>', '<code>', '</code>','[', ']', '.', ':');
+		$str_to = array('<span class="', '<span class="syntax', '</span>', '', '', '&#91;', '&#93;', '&#46;', '&#58;');
+
+		if ($remove_tags)
+		{
+			$str_from[] = '<span class="syntaxdefault">&lt;?php </span>';
+			$str_to[] = '';
+			$str_from[] = '<span class="syntaxdefault">&lt;?php&nbsp;';
+			$str_to[] = '<span class="syntaxdefault">';
+		}
+
+		$code = str_replace($str_from, $str_to, $code);
+		$code = preg_replace('#^(<span class="[a-z_]+">)\n?(.*?)\n?(</span>)$#is', '$1$2$3', $code);
+
+		if ($remove_tags)
+		{
+			$code = preg_replace('#(<span class="[a-z]+">)?\?&gt;(</span>)#', '$1&nbsp;$2', $code);
+		}
+
+		$code = preg_replace('#^<span class="[a-z]+"><span class="([a-z]+)">(.*)</span></span>#s', '<span class="$1">$2</span>', $code);
+		$code = preg_replace('#(?:\s++|&nbsp;)*+</span>$#u', '</span>', $code);
+
+		// remove newline at the end
+		if (!empty($code) && substr($code, -1) == "\n")
+		{
+			$code = substr($code, 0, -1);
+		}
+
+		return $code;
+	}
+}
+
+/**
+ * A BBcode parser for quote usernames
+ *
+ */
+class quote_bbcode_parser extends phpbb_bbcode_parser
+{
+	public function __construct()
+	{
+		parent::__construct();
+		$this->tags = array('b' => $this->tags['b'], 'i' => $this->tags['i'], 'u' => $this->tags['u'], 'color' => $this->tags['color'], 'url' => $this->tags['url']);
 	}
 }
