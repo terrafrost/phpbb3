@@ -96,14 +96,14 @@ abstract class phpbb_bbcode_parser_base
 	 *
 	 * @var string
 	 */
-	private $tag_regex = '\[(/?)(\*|[a-z][a-z0-9]*)(?:=(\'[^\']*\'|"[^"]*"|[^ \]]*))?((?: [a-z]+(?:\s?=\s?(?:\'[^\']*\'|"[^"]*"|[^ \]]*))?)*)\]';
+	private $tag_regex = '~\[(/?)(\*|[a-z][a-z0-9]*)(?:=(\'[^\']*\'|"[^"]*"|[^ \]]*))?((?: [a-z]+(?:\s?=\s?(?:\'[^\']*\'|"[^"]*"|[^ \]]*))?)*)\]~i';
 	
 	/**
 	 * Regex for URL's
 	 * 
 	 * @var string
 	 */
-	private $url_regex = '(?>([a-z+]{2,}://|www\.))(?:[a-z0-9]+(?:\.[a-z0-9]+)?@)?(?:(?:[a-z](?:[a-z0-9]|(?<!-)-)*[a-z0-9])(?:\.[a-z](?:[a-z0-9]|(?<!-)-)*[a-z0-9])+|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))(?:/[^\\/:?*"<>|\n]*[a-z0-9])*/?(?:\?[a-z0-9_.%]+(?:=[a-z0-9_.%:/+-]*)?(?:&[a-z0-9_.%]+(?:=[a-z0-9_.%:/+-]*)?)*)?(?:#[a-z0-9_%.]+)?';
+	private $url_regex = '~(?>([a-z+]{2,}://|www\.))(?:[a-z0-9]+(?:\.[a-z0-9]+)?@)?(?:(?:[a-z](?:[a-z0-9]|(?<!-)-)*[a-z0-9])(?:\.[a-z](?:[a-z0-9]|(?<!-)-)*[a-z0-9])+|(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))(?:/[^\\/:?*"<>|\n]*[a-z0-9])*/?(?:\?[a-z0-9_.%]+(?:=[a-z0-9_.%:/+-]*)?(?:&[a-z0-9_.%]+(?:=[a-z0-9_.%:/+-]*)?)*)?(?:#[a-z0-9_%.]+)?~i';
 
 	/**
 	 * Regex to match attribute&value pairs.
@@ -198,19 +198,49 @@ abstract class phpbb_bbcode_parser_base
 		// Remove the delimiter from the string.
 		$string = str_replace($this->delimiter, '', $string);
 		
-		$smilies = implode('|',array_map(array($this, 'regex_quote'), array_keys($this->smilies)));
+		$smilies = implode('|', array_map(array($this, 'regex_quote'), array_keys($this->smilies)));
 		
 		// Make a regex out of the following items:
 		$regex_parts = array(
-			$this->tag_regex,
-			$this->url_regex,
-			$smilies,
+			'tag_first_pass'    => $this->tag_regex,
+			'url_first_pass'    => $this->url_regex,
+			'smiley_first_pass' => '~' . $smilies . '~i',
 		);
 
-		$regex = '~' . implode('|', $regex_parts) . '~i';
+		$parsed = '';
 
-		// Do most of the job here...
-		$string = preg_replace_callback($regex, array($this, 'first_pass_tag_check'), $string);
+		do
+		{
+			$start = array();
+			$stop = array();
+			foreach ($regex_parts as $regex_func=>$regex_part)
+			{
+				$temp = preg_replace($regex_part, $this->delimiter, $string, 1);
+				$position = strpos($temp, $this->delimiter);
+				if ($position !== false)
+				{
+					$start[$regex_func] = $position;
+					$stop[$regex_func] = strlen($string) - strlen($temp) + 1;
+					if ($position === 0)
+					{
+						break;
+					}
+				}
+			}
+
+			if (!empty($start))
+			{
+				// asort() isn't a stable sort so it isn't used
+				$sorted = $start;
+				sort($sorted);
+				$regex_func = array_search($sorted[0], $start);
+				$parsed.= preg_replace_callback($regex_parts[$regex_func], array($this, $regex_func), substr($string, 0, $stop[$regex_func]), 1);
+				$string = substr($string, $stop[$regex_func]);
+			}
+		}
+		while (!empty($start));
+
+		$string = $parsed;
 
 		// Close all remaining open tags.
 		if (sizeof($this->stack) > 0)
@@ -551,197 +581,205 @@ abstract class phpbb_bbcode_parser_base
 	 * @param array $matches
 	 * @return string
 	 */
-	private function first_pass_tag_check($matches)
+	private function tag_first_pass($matches)
 	{
-		// Parent tag does not allow children
-		if (sizeof($matches) != 5 && sizeof($this->stack) && $this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+		if (!isset($this->tags[$matches[self::MATCH_TAG_NAME]]))
+		{
+			// Tag with the given name not defined.
+			return $matches[0];
+		}
+
+		// If tag is an opening tag.
+		if (strlen($matches[self::MATCH_CLOSING_TAG]) == 0)
+		{
+			if (sizeof($this->stack))
+			{
+				if ($this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+				{
+					// Tag does not allow children.
+					return $matches[0];
+				}
+				// Tag parent not allowed for this tag. Omit here.
+				else if (!$this->parent_allowed($matches[self::MATCH_TAG_NAME], $this->stack[0]))
+				{
+					if (isset($this->tags[$this->stack[0]]['close_shadow']))
+					{
+						array_shift($this->stack);
+					}
+					else
+					{
+						return $matches[0];
+					}
+				}
+			}
+			// Is tag allowed in global scope?
+			else if (!$this->parent_allowed($matches[self::MATCH_TAG_NAME], '__global'))
+			{
+				return $matches[0];
+			}
+		
+			$tag_attributes = &$this->tags[$matches[self::MATCH_TAG_NAME]]['attributes'];
+		
+			if (strlen($matches[self::MATCH_SHORT_ARG]) != 0 && isset($tag_attributes['_']))
+			{
+				// Add short attribute.
+				$attributes = array('_' => preg_replace('#^(["\'])(.*)\1$#', '$2', $matches[self::MATCH_SHORT_ARG]));
+			}
+			else if (strlen($matches[self::MATCH_ARGS]) == 0 || (sizeof($tag_attributes)) == 0)
+			{
+				// Check all attributes, which were not used, if they are required.
+				if ($this->has_required($matches[self::MATCH_TAG_NAME], array_keys($tag_attributes)))
+				{
+					// Not all required attributes were used.
+					return $matches[0];
+				}
+				else
+				{
+					$tag = array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]);
+					if (isset($attributes))
+					{
+						$tag[] = $attributes;
+					}
+					return $this->add_tag($tag);
+				}
+			}
+			else
+			{
+				$attributes = array();
+			}
+		
+			// Analyzer...
+			$matched_attrs = array();
+		
+			preg_match_all($this->attribute_regex, $matches[self::MATCH_ARGS], $matched_attrs, PREG_SET_ORDER);
+		
+			foreach($matched_attrs as $i => $value)
+			{
+				$tag_attribs_matched = &$tag_attributes[$value[self::MATCH_ARG_NAME]];
+				if (isset($attributes[$value[self::MATCH_ARG_NAME]]))
+				{
+					// This prevents adding the same attribute more than once. Childish betatesters are needed.
+					continue;
+				}
+				if (isset($tag_attribs_matched))
+				{
+					// The attribute exists within the defined tag. Undefined tags are removed.
+					$attr_value = preg_replace('#^(["\'])(.*)\1$#', '$2', $value[self::MATCH_ARG_VALUE]);
+
+					if (isset($tag_attribs_matched['type_check']))
+					{
+						// A type check is needed for this attribute.
+
+						$type_check = $tag_attribs_matched['type_check']($attr_value);
+
+						if (!is_bool($type_check))
+						{
+							// The type check function decided to fix the input instead of returning false.
+							$attr_value = $type_check;
+						}
+						else if ($type_check === false)
+						{
+							// Type check has failed.
+							continue;
+						}
+					}
+					if (isset($tag_attribs_matched['required']) && strlen($attr_value) == 0)
+					{
+						// A required attribute is empty. This is done after the type check as the type check may return an empty value.
+						return $matches[0];
+					}
+					$attributes[$value[self::MATCH_ARG_NAME]] = $attr_value;
+				}
+			}
+		
+			// Check all attributes, which were not used, if they are required.
+			if ($this->has_required($matches[self::MATCH_TAG_NAME], array_values(array_diff(array_keys($tag_attributes), array_keys($attributes)))))
+			{
+				// Not all required attributes were used.
+				return $matches[0];
+			}
+
+			if (sizeof($attributes))
+			{
+				return $this->add_tag(array(self::TYPE_TAG, $matches[self::MATCH_TAG_NAME], $attributes));
+			}
+
+			return $this->add_tag(array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]));
+		}
+		// If tag is a closing tag.
+				
+
+		$valid = array_search($matches[self::MATCH_TAG_NAME], $this->stack);
+
+		if ($valid === false)
+		{
+			// Closing tag without open tag.
+			return $matches[0];
+		}
+		else if ($valid != 0)
+		{
+			if ($this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+			{
+				// Tag does not allow children.
+				// Do not handle other closing tags here as they are invalid in tags which do not allow children.
+				return $matches[0];
+			}
+			// Now we have to close all tags that were opened before this closing tag.
+			// We know that this tag does not close the last opened tag.
+			$to_close = array_splice($this->stack, 0, $valid + 1);
+			return $this->close_tags($to_close);
+		}
+		else if (!isset($this->tags[$matches[self::MATCH_TAG_NAME]]['close_shadow']))
+		{
+			// A unset() was elicting many notices here.
+			array_shift($this->stack);
+			$this->parsed[$this->parse_pos] = array(self::TYPE_CTAG, $matches[self::MATCH_TAG_NAME]);
+			$this->parse_pos += 2;
+			return $this->delimiter;
+		}
+		else
 		{
 			return $matches[0];
 		}
 
-		switch (sizeof($matches))
+	}
+
+	/**
+	 * Callback for preg_replace_callback in first_pass.
+	 *
+	 * @param array $matches
+	 * @return string
+	 */
+	private function smiley_first_pass($matches)
+	{
+		// Parent tag does not allow children
+		if (sizeof($this->stack) && $this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
 		{
-			// Smilies
-			case 1:
-				
-				$this->parsed[$this->parse_pos] = array(self::TYPE_ABSTRACT_SMILEY, $matches[0]);
-				$this->parse_pos += 2;
-				return $this->delimiter;
-				
-			break;
-			
-			// URL
-			case 6:
-
-				$this->parsed[$this->parse_pos] = array(self::TYPE_ABSTRACT_URL, $matches[0]);
-				$this->parse_pos += 2;
-				return $this->delimiter;
-				
-			break;
-			
-			default:
-
-				if (!isset($this->tags[$matches[self::MATCH_TAG_NAME]]))
-				{
-					// Tag with the given name not defined.
-					return $matches[0];
-				}
-
-				// If tag is an opening tag.
-				if (strlen($matches[self::MATCH_CLOSING_TAG]) == 0)
-				{
-					if (sizeof($this->stack))
-					{
-						if ($this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
-						{
-							// Tag does not allow children.
-							return $matches[0];
-						}
-						// Tag parent not allowed for this tag. Omit here.
-						else if (!$this->parent_allowed($matches[self::MATCH_TAG_NAME], $this->stack[0]))
-						{
-							if (isset($this->tags[$this->stack[0]]['close_shadow']))
-							{
-								array_shift($this->stack);
-							}
-							else
-							{
-								return $matches[0];
-							}
-						}
-					}
-					// Is tag allowed in global scope?
-					else if (!$this->parent_allowed($matches[self::MATCH_TAG_NAME], '__global'))
-					{
-						return $matches[0];
-					}
-		
-					$tag_attributes = &$this->tags[$matches[self::MATCH_TAG_NAME]]['attributes'];
-		
-					if (strlen($matches[self::MATCH_SHORT_ARG]) != 0 && isset($tag_attributes['_']))
-					{
-						// Add short attribute.
-						$attributes = array('_' => preg_replace('#^(["\'])(.*)\1$#', '$2', $matches[self::MATCH_SHORT_ARG]));
-					}
-					else if (strlen($matches[self::MATCH_ARGS]) == 0 || (sizeof($tag_attributes)) == 0)
-					{
-						// Check all attributes, which were not used, if they are required.
-						if ($this->has_required($matches[self::MATCH_TAG_NAME], array_keys($tag_attributes)))
-						{
-							// Not all required attributes were used.
-							return $matches[0];
-						}
-						else
-						{
-							$tag = array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]);
-							if (isset($attributes))
-							{
-								$tag[] = $attributes;
-							}
-							return $this->add_tag($tag);
-						}
-					}
-					else
-					{
-						$attributes = array();
-					}
-		
-					// Analyzer...
-					$matched_attrs = array();
-		
-					preg_match_all($this->attribute_regex, $matches[self::MATCH_ARGS], $matched_attrs, PREG_SET_ORDER);
-		
-					foreach($matched_attrs as $i => $value)
-					{
-						$tag_attribs_matched = &$tag_attributes[$value[self::MATCH_ARG_NAME]];
-						if (isset($attributes[$value[self::MATCH_ARG_NAME]]))
-						{
-							// This prevents adding the same attribute more than once. Childish betatesters are needed.
-							continue;
-						}
-						if (isset($tag_attribs_matched))
-						{
-							// The attribute exists within the defined tag. Undefined tags are removed.
-							$attr_value = preg_replace('#^(["\'])(.*)\1$#', '$2', $value[self::MATCH_ARG_VALUE]);
-		
-							if (isset($tag_attribs_matched['type_check']))
-							{
-								// A type check is needed for this attribute.
-
-								$type_check = $tag_attribs_matched['type_check']($attr_value);
-		
-								if (!is_bool($type_check))
-								{
-									// The type check function decided to fix the input instead of returning false.
-									$attr_value = $type_check;
-								}
-								else if ($type_check === false)
-								{
-									// Type check has failed.
-									continue;
-								}
-							}
-							if (isset($tag_attribs_matched['required']) && strlen($attr_value) == 0)
-							{
-								// A required attribute is empty. This is done after the type check as the type check may return an empty value.
-								return $matches[0];
-							}
-							$attributes[$value[self::MATCH_ARG_NAME]] = $attr_value;
-						}
-					}
-		
-					// Check all attributes, which were not used, if they are required.
-					if ($this->has_required($matches[self::MATCH_TAG_NAME], array_values(array_diff(array_keys($tag_attributes), array_keys($attributes)))))
-					{
-						// Not all required attributes were used.
-						return $matches[0];
-					}
-		
-					if (sizeof($attributes))
-					{
-						return $this->add_tag(array(self::TYPE_TAG, $matches[self::MATCH_TAG_NAME], $attributes));
-					}
-
-					return $this->add_tag(array(self::TYPE_TAG_SIMPLE, $matches[self::MATCH_TAG_NAME]));
-				}
-				// If tag is a closing tag.
-				
-
-				$valid = array_search($matches[self::MATCH_TAG_NAME], $this->stack);
-		
-				if ($valid === false)
-				{
-					// Closing tag without open tag.
-					return $matches[0];
-				}
-				else if ($valid != 0)
-				{
-					if ($this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
-					{
-						// Tag does not allow children.
-						// Do not handle other closing tags here as they are invalid in tags which do not allow children.
-						return $matches[0];
-					}
-					// Now we have to close all tags that were opened before this closing tag.
-					// We know that this tag does not close the last opened tag.
-					$to_close = array_splice($this->stack, 0, $valid + 1);
-					return $this->close_tags($to_close);
-				}
-				else if (!isset($this->tags[$matches[self::MATCH_TAG_NAME]]['close_shadow']))
-				{
-					// A unset() was elicting many notices here.
-					array_shift($this->stack);
-					$this->parsed[$this->parse_pos] = array(self::TYPE_CTAG, $matches[self::MATCH_TAG_NAME]);
-					$this->parse_pos += 2;
-					return $this->delimiter;
-				}
-				else
-				{
-					return $matches[0];
-				}
-				
-			break;
+			return $matches[0];
 		}
+
+		$this->parsed[$this->parse_pos] = array(self::TYPE_ABSTRACT_SMILEY, $matches[0]);
+		$this->parse_pos += 2;
+		return $this->delimiter;
+	}
+
+	/**
+	 * Callback for preg_replace_callback in first_pass.
+	 *
+	 * @param array $matches
+	 * @return string
+	 */
+	private function url_first_pass($matches)
+	{
+		// Parent tag does not allow children
+		if (sizeof($this->stack) && $this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+		{
+			return $matches[0];
+		}
+
+		$this->parsed[$this->parse_pos] = array(self::TYPE_ABSTRACT_URL, $matches[0]);
+		$this->parse_pos += 2;
+		return $this->delimiter;
 	}
 
 	/**
