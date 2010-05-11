@@ -240,7 +240,7 @@ abstract class phpbb_bbcode_parser_base
 		}
 		while (!empty($start));
 
-		$string = $parsed;
+		$string = $parsed . $string;
 
 		// Close all remaining open tags.
 		if (sizeof($this->stack) > 0)
