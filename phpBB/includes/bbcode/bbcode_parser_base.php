@@ -212,7 +212,7 @@ abstract class phpbb_bbcode_parser_base
 		do
 		{
 			$start = array();
-			$stop = array();
+			$length = array();
 			foreach ($regex_parts as $regex_func=>$regex_part)
 			{
 				$temp = preg_replace($regex_part, $this->delimiter, $string, 1);
@@ -220,7 +220,7 @@ abstract class phpbb_bbcode_parser_base
 				if ($position !== false)
 				{
 					$start[$regex_func] = $position;
-					$stop[$regex_func] = strlen($string) - strlen($temp) + 1;
+					$length[$regex_func] = strlen($string) - strlen($temp) + 1;
 					if ($position === 0)
 					{
 						break;
@@ -234,8 +234,8 @@ abstract class phpbb_bbcode_parser_base
 				$sorted = $start;
 				sort($sorted);
 				$regex_func = array_search($sorted[0], $start);
-				$parsed.= preg_replace_callback($regex_parts[$regex_func], array($this, $regex_func), substr($string, 0, $stop[$regex_func]), 1);
-				$string = substr($string, $stop[$regex_func]);
+				$parsed.= preg_replace_callback($regex_parts[$regex_func], array($this, $regex_func), substr($string, 0, $start[$regex_func] + $length[$regex_func]), 1);
+				$string = substr($string, $start[$regex_func] + $length[$regex_func]);
 			}
 		}
 		while (!empty($start));
