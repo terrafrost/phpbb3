@@ -234,53 +234,28 @@ abstract class phpbb_bbcode_parser_base
 				$sorted = $start;
 				sort($sorted);
 				$regex_func = array_search($sorted[0], $start);
-				$parsed.= preg_replace_callback($regex_parts[$regex_func], array($this, $regex_func), substr($string, 0, $start[$regex_func] + $length[$regex_func]), 1);
+				if (!isset($this->parsed[$this->parse_pos - 1]))
+				{
+					$this->parsed[$this->parse_pos - 1] = '';
+				}
+				$this->parsed[$this->parse_pos - 1].= substr($string, 0, $start[$regex_func]);
+				$parsed = strpos(preg_replace_callback($regex_parts[$regex_func], array($this, $regex_func), $string, 1), $this->delimiter) !== false;
+				if (!$parsed)
+				{
+					$this->parsed[$this->parse_pos - 1].= substr($string, $start[$regex_func], $length[$regex_func]);
+				}
 				$string = substr($string, $start[$regex_func] + $length[$regex_func]);
 			}
 		}
 		while (!empty($start));
 
-		$string = $parsed . $string;
+		$this->parsed[$this->parse_pos - 1].= $string;
 
-		// Close all remaining open tags.
-		if (sizeof($this->stack) > 0)
-		{
-			$string .= $this->close_tags($this->stack);
-			$this->stack = array();
-		}
-		
-		// Make a serialized array out of it.
-		$string = explode($this->delimiter, $string);
-		
-		if (sizeof($string) > 1)
-		{
-			$parsed = array();
-	
-			$this->parse_pos = 0;
-	
-			end($this->parsed);
-			reset($string);
-			foreach ($this->parsed as $key => $val)
-			{	
-				$parsed[key($string) * 2] = current($string);
-				$parsed[$key] = $val;
-				next($string);
-			}
+		$string = $this->parsed;
+		$this->parsed = array();
+		$this->parse_pos = 1;
 
-			if (current($string) !== false)
-			{
-				$parsed[key($string) * 2] = current($string);
-			}
-	
-			$this->parsed = array();
-			$this->parse_pos = 1;
-		}
-		else
-		{
-			$parsed = $string;
-		}
-
-		return serialize($parsed);
+		return serialize($string);
 	}
 
 	/**
@@ -773,6 +748,11 @@ abstract class phpbb_bbcode_parser_base
 	{
 		// Parent tag does not allow children
 		if (sizeof($this->stack) && $this->tags[$this->stack[0]]['children'][0] == false && sizeof($this->tags[$this->stack[0]]['children']) == 1)
+		{
+			return $matches[0];
+		}
+
+		if (!preg_match('#[\n\t (.]$#', $this->parsed[$this->parse_pos - 1]) && !($this->parse_pos == 1 && empty($this->parsed[0])))
 		{
 			return $matches[0];
 		}
