@@ -597,8 +597,35 @@ abstract class phpbb_bbcode_parser_base
 		
 			if (strlen($matches[self::MATCH_SHORT_ARG]) != 0 && isset($tag_attributes['_']))
 			{
+				// Validate short attribute.
+				$value = preg_replace('#^(["\'])(.*)\1$#', '$2', $matches[self::MATCH_SHORT_ARG]);
+				if (isset($tag_attributes['_']['type_check']))
+				{
+					// A type check is needed for this attribute.
+
+					$type_check = call_user_func($tag_attributes['_']['type_check'], $value);
+
+					if (!is_bool($type_check))
+					{
+						// The type check function decided to fix the input instead of returning false.
+						$attr_value = $type_check;
+					}
+					else if ($type_check === false)
+					{
+						// Type check has failed.
+						if (isset($tag_attributes['_']['required']))
+						{
+							return $matches[0];
+						}
+						unset($value);
+					}
+				}
+
 				// Add short attribute.
-				$attributes = array('_' => preg_replace('#^(["\'])(.*)\1$#', '$2', $matches[self::MATCH_SHORT_ARG]));
+				if (isset($value))
+				{
+					$attributes = array('_' => $value);
+				}
 			}
 			else if (strlen($matches[self::MATCH_ARGS]) == 0 || (sizeof($tag_attributes)) == 0)
 			{
@@ -645,7 +672,7 @@ abstract class phpbb_bbcode_parser_base
 					{
 						// A type check is needed for this attribute.
 
-						$type_check = $tag_attribs_matched['type_check']($attr_value);
+						$type_check = call_user_func($tag_attribs_matched['type_check'], $attr_value);
 
 						if (!is_bool($type_check))
 						{
